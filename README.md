@@ -19,4 +19,4 @@ aggregate_analysis_scripts : Scripts for analyzing aggregates-clusters of variou
 
 microgels : Some scripts for microgel generation, simulation and analysis from the 1st year of my PhD   
 
-I have a lot more scripts, that are somewhat less structured-organized but I can share those as well, if you want to. 
+I have a lot more scripts that are somewhat less structured-organized but I can share those as well, if you want to. 
