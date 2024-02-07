@@ -1,0 +1,349 @@
+#!/home/statt/anaconda3/bin/python
+import numpy as np
+import sys, os
+import hoomd
+import hoomd.md
+sys.path.insert(0,"/home/bargun2/Programs/hoomd-blue/build/hoomd-2.9.2/hoomd")
+import azplugins
+from RandomPolymerMeltMaker_angle import SphereMicrogelMixtureMaker, connected_components
+import networkx as nx
+import argparse
+from sys import argv
+from CoronaMaker import CoronaMaker
+
+######## PARAMETERS #################
+
+parser = argparse.ArgumentParser(description="Microgel production with specified parameters - MUST SPECIFY GPU WITH --gpu=1 or --gpu=0")
+non_opt = parser.add_argument_group("arguments")
+non_opt.add_argument('-n', '--run_no', metavar="<float>", type=float, dest="run_no", required=False, help="The number of the run if you run a couple of sims with the sme parameters",default=99.0)
+non_opt.add_argument('--has_gauss_wall', metavar="<int>", type=int, dest="is_gauss_wall", required=False, help="set to 1 if you want to have gauss wall on", default=0 )
+
+non_opt.add_argument('--has_corona', metavar="<int>", type=int, dest="has_corona", required=False, help="set to 1 if you want to build corona at the end - for details see corona_making.hoomd and CoronaMaker.py ", default=0 )
+non_opt.add_argument('--corona_ratio', metavar="<float>", type=float, dest="corona_ratio", required=False, help=" N_corona/N_core - default 0.2 ", default=0.2 )
+non_opt.add_argument('--corona_mean', metavar="<float>", type=float, dest="corona_mean", required=False, help=" Corona Mean chain length(has lognormal distr) - default 20.0 ", default=20.0 )
+non_opt.add_argument('--corona_variance', metavar="<float>", type=float, dest="corona_variance", required=False, help=" Corona variance chain length(has lognormal distr) - default 100.0 ", default=100.0 )
+non_opt.add_argument('--exclusion', metavar="<int>", type=int, dest="exclusion", required=False, help="Select monomers -exclusion- beads away from cr-tjunc-freeend to convert to crosslinkers for corona ", default=4 )
+
+
+non_opt.add_argument('-u', '--mu', metavar="<float>", type=float, dest="mu", required=False, help="Positive number" )
+non_opt.add_argument('-s', '--sigma', metavar="<float>", type=float, dest="sigma", required=False, help="Positive number" )
+non_opt.add_argument('-m', '--mean', metavar="<float>", type=float, dest="mean", required=False, help="Positive number", default=20.0 )
+non_opt.add_argument('-v', '--variance', metavar="<float>", type=float, dest="variance", required=False, help="Positive number", default=200.0 )
+non_opt.add_argument('-r', '--radius', metavar="<float>", type=float, dest="radius", required=False, help="Positive number" )
+non_opt.add_argument('-d', '--density', metavar="<float>", type=float, dest="density", required=False, help="Positive number" )
+non_opt.add_argument('-w', '--wall_eps', metavar="<float>", type=float, dest="wall_gauss_eps", required=False, help="Positive number", default=2.01 )
+non_opt.add_argument('-p', '--wall_cut', metavar="<float>", type=float, dest="wall_gauss_cut", required=False, help="Positive number", default=5.0 )
+non_opt.add_argument('-g', '--gpu', metavar="<int>", type=int, dest="gpu_id", required=False, help="0 or 1. 2 for using both with NV-LINK shouldnt be necessary most of the time" )
+non_opt.add_argument('--wall_sigma', metavar="<float>", type=float, dest="wall_gauss_sigma", required=False, help="Positive number", default=30.0 )
+non_opt.add_argument('-l', '--free_end_length', metavar="<float>", type=float, dest="free_end_length", required=False, help="Higher than these will be free ended chains", default="105.0")
+non_opt.add_argument('-f', '--free_end_rate', metavar="<float>", type=float, dest="free_end_rate", required=False, help="Float btw 0-1, rate of free ended chains ", default="0.0")
+non_opt.add_argument('--fraction', metavar="<float>", type=float, dest="f", required=False, help="Fraction of crosslinkers, default 0.25", default=0.25 )
+non_opt.add_argument('--has_angle', metavar="<int>", type=int, dest="has_angle", required=True, help="set to 1 if you want to have angles " )
+non_opt.add_argument('--angle_coeff', metavar="<float>", type=float, dest="angle_coeff", required=False, help="strength of the harmonic angle ", default=10 )
+non_opt.add_argument('--angle_t0', metavar="<float>", type=float, dest="angle_t0", required=False, help="minimizer angle ", default=2.5 )
+args = parser.parse_args()
+run_no = args.run_no
+is_gauss_wall = args.is_gauss_wall
+mu = args.mu
+sigma = args.sigma
+mean = args.mean
+variance = args.variance
+R = args.radius
+rho = args.density
+gpu_id = args.gpu_id
+wall_gauss_eps = args.wall_gauss_eps
+wall_gauss_cut = args.wall_gauss_cut
+wall_gauss_sigma = args.wall_gauss_sigma
+free_end_length = args.free_end_length
+free_end_rate = args.free_end_rate
+f = args.f
+has_corona = args.has_corona
+corona_ratio = args.corona_ratio
+corona_mean = args.corona_mean
+corona_variance = args.corona_variance
+exclusion = args.exclusion
+has_angle = args.has_angle
+angle_coeff = args.angle_coeff
+angle_t0 = args.angle_t0
+
+rho_default = 0.25
+R_default = 35.0
+sigma_default = 0.6367
+mu_default = 2.793
+gpu_id_default = 0
+print("******************************************************************************************************************************")
+print("********************************************************** SIMULATION BEGINNING ********************************************************************")
+print("******************************************************************************************************************************")
+print("****************************** RUN NO : " + str(run_no) + " *********************************************************************")
+print(" -  - - - -- - THe script is : mgel_angle.hoomd  - - - - - -- - - - - - - -- - - -")
+
+if(has_corona==1):
+    print("Corona is active with : ")
+    print("Corona ratio is : " + str(corona_ratio))
+    print("Corona mean chain length : " + str(corona_mean))
+    print("Corona mean vars : " + str(corona_variance))
+else:
+    print("Corona is INACTIVE")
+
+if(is_gauss_wall==1):
+    print("Gauss Wall potential is active with : ")
+    print("Wall gauss eps : " + str(wall_gauss_eps))
+    print("Wall gauss cut : " + str(wall_gauss_cut))
+elif(np.absolute(wall_gauss_eps-2.01)>0.0001):
+    print("You've specified a gauss wall potential parameter without activating the wall - Activate the wall or remove that parameter input")
+    exit()
+else:
+    print("No Gauss Wall will be used")
+
+if(rho == None):
+    print("rho Not specified using default ", rho_default)
+    rho = rho_default
+
+if(R == None):
+    print("Radius Not specified using default ", R_default)
+    R = R_default
+
+if(mu == None):
+    print("Mu Not specified using default ", mu_default)
+    mu = mu_default
+
+if(sigma == None):
+    print("Sigma Not specified using default ", sigma_default)
+    sigma = sigma_default
+
+if(gpu_id == None):
+    print("Gpu_id Not specified using default ", gpu_id_default)
+    gpu_id = gpu_id_default
+
+if(mean != None and variance != None):
+    mu = np.log(np.divide(np.square(mean),np.power(np.add(np.square(mean),variance),0.5)))
+    sigma = np.power(np.log(np.add(1.0,np.divide(variance,np.square(mean)))),0.5)
+    print("Using variance and mean to generate lognormal distribution : " +  str(mean) + " " + str(variance))
+    print("mu is : " + str(mu) + " sigma is : " + str(sigma))
+
+if(has_angle==1):
+    print("Angle t0: ", angle_t0)
+    print("Angle_coeff: ", angle_coeff)
+else:
+    print("No angle potential")
+
+# https://en.wikipedia.org/wiki/Gamma_distribution
+# https://numpy.org/doc/stable/reference/random/generated/numpy.random.gamma.html
+
+kT = 1.0   # Temperature
+# R = 35.    # radius of spherical cavity/confinement
+# rho = 0.25 # density of polymer monomers inside of sphere
+#f = 1/4.   # fraction of crosslinkers to chain ends (1/4 = perfect match bc every crosslinker can make 4 bonds)
+if(gpu_id==2):
+    context_initialize_str = "--gpu=0,1"
+    print('********** USING BOTH GPUS *********')
+else:
+    context_initialize_str = "--gpu=" + str(gpu_id)
+
+
+######## PARAMETERS END #################
+
+hoomd.context.initialize(context_initialize_str)
+sim = hoomd.context.SimulationContext()
+
+s = SphereMicrogelMixtureMaker(R=R,rho=rho,f=f,distribution_parameters=(mu,sigma),free_end_params=(free_end_length,free_end_rate),is_angle=has_angle)
+system = hoomd.init.read_snapshot(s.get_snap(sim))
+
+# confinement:
+# add walls to confine the system - for now purely repulsive WCA wall
+walls = hoomd.md.wall.group(hoomd.md.wall.sphere(r=R,origin=(0,0,0)))
+wall_force_slj = hoomd.md.wall.slj(walls, r_cut=2**(1/6.))
+wall_force_slj.force_coeff.set(['A','B','C','D'], epsilon=1.0, sigma=1.0)
+if(is_gauss_wall ==1):
+    wall_force_gauss = hoomd.md.wall.gauss(walls, r_cut=wall_gauss_cut)
+    wall_force_gauss.force_coeff.set(['C'], epsilon=wall_gauss_eps, sigma=wall_gauss_sigma)
+    wall_force_gauss.force_coeff.set(['A','B','D'], epsilon=0.001, sigma=0.001)
+# system:
+# A - chain ends - reacts with crosslinker
+# B - chain middle (doesn't react)
+# C - crosslinker (can form up to 4 bonds)
+# D - dummy particle, doesn't do anything
+
+# bond - actual bond
+# dummybond - doesn't do anything
+
+nl = hoomd.md.nlist.tree()
+
+# use soft dpd interaction first to run simulations to remove overlaps
+dpd = hoomd.md.pair.dpd(r_cut=1.0, nlist=nl,kT=kT,seed=4543)
+dpd.pair_coeff.set(['A','B','C','D'],['A','B','C','D'], A=10.0, gamma=5)
+
+harmonic = hoomd.md.bond.harmonic(name="harmonic")
+harmonic.bond_coeff.set('bond', k=500, r0=0.95)
+harmonic.bond_coeff.set('dummybond', k=0, r0=0.0)
+
+harmonic_angle = hoomd.md.angle.harmonic()
+harmonic_angle.angle_coeff.set('angle', k=angle_coeff, t0=angle_t0)
+harmonic_angle.angle_coeff.set('dummyangle', k=0, t0=0.0)
+
+# output - for now only trajectory  - lots of snapshots: period=1e3 can be reduced.
+if not os.path.exists('./out/'):
+    os.makedirs('./out/')
+
+### notes on the last run, things to change
+#### this  run is to plot bond ing evaluation so adjust dump frequencies accordingly
+# n = './out/mean_%1.2f_no_%1.1f_crfraction_%1.2f_density_%1.2f_radius_%1.1f_anglecoeff_%1.2f_coronamean_%1.2f_partfourcrlinker.gsd'%(mean,run_no,f,rho,R,angle_coeff,corona_mean)
+n = './out/mean_%1.2f_vars_%1.1f_no_%1.1f_crfraction_%1.3f_density_%1.2f_radius_%1.1f_anglecoeff_%1.2f_partcr101.gsd'%(mean,variance,run_no,f,rho,R,angle_coeff)
+d = hoomd.dump.gsd(n, period=1e4,dynamic=['attribute', 'momentum', 'topology'], group=hoomd.group.all(), overwrite=True) # was 1e4
+print("Output file is " + n[6:] )
+
+hoomd.md.integrate.mode_standard(dt=0.05)
+# nve with limit=0.1 to prevent particles flying out of the box
+nve = hoomd.md.integrate.nve(group=hoomd.group.all(),limit=0.1)
+
+# run long enough to remove overlap and get homogenous distribution insde of sphere
+hoomd.run(1e4)
+
+# disable soft interactions, switch to WCA interactions
+dpd.disable()
+lj = hoomd.md.pair.lj(r_cut=2**(1/6.), nlist=nl)
+lj.pair_coeff.set(['A', 'B','C','D'],['A','B','C','D'], epsilon=1.0, sigma=1.0)
+lj.pair_coeff.set(['D'],['A','B','C','D'], epsilon=0.0, sigma=0.0,r_cut=False) # make 'D' a dummy particle
+
+# only run very short - making sure there is no overlap etc.
+hoomd.run(1e3)
+d.set_period(64000) # uncomment this line
+nve.disable()
+harmonic_angle.angle_coeff.set('angle', k=angle_coeff, t0=angle_t0)
+hoomd.md.integrate.mode_standard(dt=0.01)
+langevin = hoomd.md.integrate.langevin(group=hoomd.group.all(), kT=kT, seed=2)
+
+# this actually now starts forming bonds between A and C!
+groupA = hoomd.group.type(name='a-particles', type='A') # end chain to react with crosslinker
+groupC = hoomd.group.type(name='c-particles', type='C') # crosslinkers
+# max_bonds gives you how many bonds can be on a particle, includes already existing bonds, so A should be able to form 2
+# distance condition for bond formation is r<=r_cut=1.1, it checks every 5 timesteps if the condition is fullfilled
+bondings = azplugins.update.dynamic_bond(nlist=nl,r_cut=1.1,period=5,bond_type='bond',group_1=groupC, group_2=groupA, max_bonds_1=4,max_bonds_2=2)
+# TODO: check bond formation over time and check that this is long enoough
+# use analyze_bonds_time_evolution.py and analyze_bonded_cluster_size.py for that
+hoomd.run(2e5) #was 1.3e5
+d.set_period(200000) ##was 200000
+# remove (= turn into 'D') unreacted material, keep only biggest network/cluster/aggregate
+# this is sometimes slow, and the code 'hangs' here a bit. (networkx is better/faster
+# than anything I could come up with)
+bondings.disable()
+snapshot = system.take_snapshot(bonds=True)
+snapshot_old = snapshot
+
+bonds = snapshot.bonds.group[snapshot.bonds.typeid==0]
+ids = snapshot.bonds.group[snapshot.bonds.typeid==0]
+all_ids = list(np.unique((ids).flatten()))
+
+G = nx.Graph()
+G.add_nodes_from(all_ids)
+G.add_edges_from(bonds)
+A = sorted(nx.connected_components(G), key = len, reverse=True)
+biggest = A[0]
+
+for i in range(len(snapshot.particles.typeid)):
+    if i not in biggest:
+        snapshot.particles.typeid[i] = 3
+        snapshot.particles.velocity[i]=(0,0,0)
+        snapshot.particles.position[i]=(0,0,0)
+
+for i in range(len(snapshot.bonds.typeid)):
+    if snapshot.bonds.group[i,0] not in biggest:
+        snapshot.bonds.typeid[i]=1
+
+for i in range(len(snapshot.angles.typeid)):
+    if snapshot.angles.group[i,0] not in biggest:
+        snapshot.angles.typeid[i]=1
+
+harmonic_angle.angle_coeff.set('angle', k=0.0, t0=0.0)
+system.restore_snapshot(snapshot)
+# remove spherical walls and integrate everything except dummy particles - microgel will swell
+# look at density (1D and 2D) and radius,width,..
+wall_force_slj.disable()
+
+if(is_gauss_wall == 1):
+    wall_force_gauss.disable()
+
+langevin.disable()
+not_D = hoomd.group.difference(name='not-D',a=hoomd.group.all(),b=hoomd.group.type(name='d-particles', type='D'))
+langevin = hoomd.md.integrate.langevin(group=not_D, kT=kT, seed=2)
+
+if(has_corona!=1):
+    print("****************** NO CORONA WILL BE BUILD ************************")
+    hoomd.run(9e5)
+    d.set_period(20000) ### last five frames
+    hoomd.run(1e5)
+else:
+    hoomd.run(3e5) # was 4e5
+    d.set_period(20000) ### averaging frames before the shell
+    hoomd.run(6e4) # was 6e4
+    print("****************** CORONA WILL BE BUILD **************************")
+    langevin.disable()
+    lj.disable()
+    ### above just keeps running the parent simulation as it is
+    ### now we can put the Corona
+    corona_snapshot = system.take_snapshot(bonds=True)
+    cm = CoronaMaker(corona_snapshot,target_frame=0)
+    cm.read_system()
+
+    mu_corona = np.log(np.divide(np.square(corona_mean),np.power(np.add(np.square(corona_mean),corona_variance),0.5)))
+    sigma_corona = np.power(np.log(np.add(1.0,np.divide(corona_variance,np.square(corona_mean)))),0.5)
+
+    lognormal_corona = [mu_corona,sigma_corona]
+
+    cm.add_corona(lognormal_corona,corona_ratio,exclusion)
+
+    new_corona_snapshot = cm.return_snapshot()
+
+    hoomd.context.initialize(context_initialize_str)
+    sim2 = hoomd.context.SimulationContext()
+
+    system = hoomd.init.read_snapshot(new_corona_snapshot)
+
+    nl = hoomd.md.nlist.tree()
+
+    dpd = hoomd.md.pair.dpd(r_cut=1.0, nlist=nl,kT=kT,seed=4543)
+    dpd.pair_coeff.set(['A','B','C','D'],['A','B','C','D'], A=10.0, gamma=5)
+    dpd.pair_coeff.set(['D'],['A','B','C','D'], A=0.0, gamma=0.0,r_cut=False)
+
+    harmonic = hoomd.md.bond.harmonic(name="harmonic")
+    harmonic.bond_coeff.set('bond', k=500, r0=0.95)
+    harmonic.bond_coeff.set('dummybond', k=0, r0=0.0)
+    not_D = hoomd.group.difference(name='not-D',a=hoomd.group.all(),b=hoomd.group.type(name='d-particles', type='D'))
+
+    hoomd.md.integrate.mode_standard(dt=0.05)
+    nve = hoomd.md.integrate.nve(group=not_D,limit=0.1)
+
+    d = hoomd.dump.gsd(n, period=2e5,dynamic=['attribute', 'momentum', 'topology'], group=hoomd.group.all(), overwrite=False) ### we want to append it to the existing microgel
+    ### might create a corona directory and put them there as well but I prefer this
+    hoomd.run(1e5) ### remove overlap dpd + limit (run corona 1)
+    dpd.disable()
+
+    lj = hoomd.md.pair.lj(r_cut=2**(1/6.), nlist=nl)
+    lj.pair_coeff.set(['A', 'B','C','D'],['A','B','C','D'], epsilon=1.0, sigma=1.0)
+    lj.pair_coeff.set(['D'],['A','B','C','D'], epsilon=0.0, sigma=0.0,r_cut=False) # make 'D' a dummy particle
+
+    hoomd.run(1e4) ### remove overlap lj + limit (run corona 2)
+    nve.disable()
+    hoomd.md.integrate.mode_standard(dt=0.01)
+    langevin = hoomd.md.integrate.langevin(group=not_D, kT=kT, seed=5)
+    hoomd.run(3e5) ## was 5e5  ### final corona run just as the regular last run
+    d.set_period(20000)### this is to be able to average over the last 5 frames
+    hoomd.run(6e4) ## was 6e4
+
+print("******************************************************************************************************************************")
+print("********************************************************** SIMULATION ENDING ********************************************************************")
+print("******************************************************************************************************************************")
+print("****************************** RUN NO : " + str(run_no) + " *********************************************************************")
+
+
+
+
+
+
+
+
+
+
+
+
+exit()
